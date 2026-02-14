@@ -147,7 +147,7 @@ def create_word_docx(history):
 
 
 # --- 3. STREAMLIT UI LAYOUT ---
-st.title("🤖 IBM ACE/IIB Code Explainer")
+st.title("🤖 Aetna ACE Code Explainer")
 st.markdown("Paste your **ESQL, Java, or Message Flow XML** below. I will explain the logic step-by-step.")
 
 # Sidebar for Actions
