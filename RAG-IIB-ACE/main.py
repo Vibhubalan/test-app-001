@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import time
 import re
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from docx import Document
@@ -13,33 +12,43 @@ import instructions  # Ensure instructions.py is in the same folder
 
 # --- 1. SETUP & CONFIGURATION ---
 st.set_page_config(page_title="IIB/ACE Code Explainer", page_icon="🤖", layout="wide")
-load_dotenv()
 
+# --- 2. SIDEBAR CONFIGURATION (API KEY INPUT) ---
+with st.sidebar:
+    st.header("🔑 Configuration")
+    
+    # Secure Input for API Key
+    user_api_key = st.text_input(
+        "Enter Google Gemini API Key",
+        type="password",
+        help="Get your key from aistudio.google.com"
+    )
+    
+    if not user_api_key:
+        st.warning("⚠️ Please enter your API Key to proceed.")
 
-# --- FIX: CACHE THE CLIENT RESOURCE ---
+# --- 3. CACHED CLIENT INITIALIZATION ---
 @st.cache_resource
-def get_gemini_client():
+def get_gemini_client(api_key):
     """
-    Creates the Gemini Client only once and keeps it alive
-    across Streamlit reruns.
+    Creates the Gemini Client only once per API Key.
     """
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        st.error("❌ GOOGLE_API_KEY not found in .env file.")
-        st.stop()
     return genai.Client(api_key=api_key)
 
-
-# Get the persistent client
-client = get_gemini_client()
+# Initialize Client only if Key is provided
+client = None
+if user_api_key:
+    try:
+        client = get_gemini_client(user_api_key)
+    except Exception as e:
+        st.error(f"Invalid API Key: {e}")
 
 # Initialize Session State (Memory)
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Initialize Chat Session
-# We pass the persistent 'client' to the chat session
-if "chat_session" not in st.session_state:
+# Initialize Chat Session (Only if client exists)
+if client and "chat_session" not in st.session_state:
     st.session_state.chat_session = client.chats.create(
         model="gemini-2.5-flash",
         config=types.GenerateContentConfig(
@@ -48,24 +57,21 @@ if "chat_session" not in st.session_state:
         )
     )
 
-
-# --- 2. ADVANCED WORD DOCUMENT GENERATION ---
+# --- 4. ADVANCED WORD DOCUMENT GENERATION ---
 def add_markdown_paragraph(doc, text, style='Normal'):
     """Helper: Parses **bold** text and adds it to the Word doc."""
     p = doc.add_paragraph(style=style)
-    # Split by ** to find bold parts
     parts = text.split('**')
     for i, part in enumerate(parts):
         run = p.add_run(part)
-        if i % 2 == 1:  # Every odd index was inside ** **
+        if i % 2 == 1:
             run.bold = True
     return p
-
 
 def create_word_docx(history):
     """Generates a professionally formatted Word document from chat history."""
     doc = Document()
-
+    
     # -- Document Title --
     heading = doc.add_heading('IIB Code Analysis Report', 0)
     heading.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -75,13 +81,12 @@ def create_word_docx(history):
     for msg in history:
         role = msg["role"]
         content = msg["content"]
-
+        
         # --- USER SECTION ---
         if role == "user":
             h = doc.add_heading('User Query / Code:', level=2)
-            h.style.font.color.rgb = RGBColor(0, 51, 102)  # Dark Blue
-
-            # Check if it looks like code
+            h.style.font.color.rgb = RGBColor(0, 51, 102) # Dark Blue
+            
             if "CREATE" in content or "SET" in content or len(content.split('\n')) > 3:
                 p = doc.add_paragraph()
                 run = p.add_run(content)
@@ -97,19 +102,17 @@ def create_word_docx(history):
         # --- ASSISTANT SECTION ---
         elif role == "assistant":
             h = doc.add_heading('Analysis & Explanation:', level=2)
-            h.style.font.color.rgb = RGBColor(34, 139, 34)  # Forest Green
-
+            h.style.font.color.rgb = RGBColor(34, 139, 34) # Forest Green
+            
             lines = content.split('\n')
             in_code_block = False
-
+            
             for line in lines:
                 line = line.strip()
-
-                # Handle Code Blocks
                 if line.startswith("```"):
                     in_code_block = not in_code_block
                     continue
-
+                
                 if in_code_block:
                     p = doc.add_paragraph()
                     run = p.add_run(line)
@@ -119,90 +122,79 @@ def create_word_docx(history):
                     p.paragraph_format.left_indent = Inches(0.5)
                     p.paragraph_format.space_after = Pt(0)
                     continue
-
-                # Handle Headings
+                
                 if line.startswith("### "):
                     doc.add_heading(line.replace("### ", ""), level=3)
                 elif line.startswith("## "):
                     doc.add_heading(line.replace("## ", ""), level=2)
-
-                # Handle Lists
                 elif line.startswith("- ") or line.startswith("* "):
                     add_markdown_paragraph(doc, line[2:], style='List Bullet')
                 elif re.match(r'^\d+\.', line):
                     clean_line = line.split('.', 1)[1].strip()
                     add_markdown_paragraph(doc, clean_line, style='List Number')
-
-                # Handle Normal Text
                 elif line:
                     add_markdown_paragraph(doc, line, style='Normal')
 
             doc.add_paragraph("_" * 50)
 
-    # Save to Memory Buffer
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-
-# --- 3. STREAMLIT UI LAYOUT ---
+# --- 5. STREAMLIT UI LAYOUT ---
 st.title("🤖 Aetna ACE Code Explainer")
-st.markdown("Paste your **ESQL, Java, or Message Flow XML** below. I will explain the logic step-by-step.")
+
+if not user_api_key:
+    st.info("👈 Please enter your **Google Gemini API Key** in the sidebar to start.")
+else:
+    st.markdown("Paste your **ESQL, Java, or Message Flow XML** below. I will explain the logic step-by-step.")
 
 # Sidebar for Actions
 with st.sidebar:
     st.header("📄 Actions")
-    st.info("Chat with the bot first. The download button will appear below once you have a conversation history.")
-
+    
     if st.session_state.messages:
-        # Generate the file in memory
         docx_file = create_word_docx(st.session_state.messages)
-
-        # The Download Button
         st.download_button(
             label="📥 Download Report (.docx)",
             data=docx_file,
             file_name=f"IIB_Analysis_{int(time.time())}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-
+    
     if st.button("🗑️ Clear Chat"):
         st.session_state.messages = []
-        # Re-create chat session using the PERSISTENT client
-        st.session_state.chat_session = client.chats.create(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=instructions.SYSTEM_PROMPT,
-                temperature=0.3,
+        if client:
+            st.session_state.chat_session = client.chats.create(
+                model="gemini-2.0-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=instructions.SYSTEM_PROMPT,
+                    temperature=0.3,
+                )
             )
-        )
         st.rerun()
 
-# --- 4. CHAT INTERFACE ---
-# Display previous messages
+# --- 6. CHAT INTERFACE ---
 for message in st.session_state.messages:
     role = message["role"]
     content = message["content"]
     with st.chat_message(role):
         st.markdown(content)
 
-# Chat Input
-if prompt := st.chat_input("Paste your IIB Code or ask a question..."):
-    # 1. Display User Message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+# Disable chat input if no API key
+if user_api_key:
+    if prompt := st.chat_input("Paste your IIB Code or ask a question..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    # 2. Generate Response
-    with st.chat_message("assistant"):
-        with st.spinner("Analyzing logic..."):
-            try:
-                response = st.session_state.chat_session.send_message(prompt)
-                st.markdown(response.text)
-
-                # 3. Save Assistant Message
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
-            except Exception as e:
-                st.error(f"Error communicating with Gemini: {e}")
-                st.warning("🔄 Try clicking 'Clear Chat' in the sidebar to reset the connection.")
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing logic..."):
+                try:
+                    response = st.session_state.chat_session.send_message(prompt)
+                    st.markdown(response.text)
+                    st.session_state.messages.append({"role": "assistant", "content": response.text})
+                except Exception as e:
+                    st.error(f"Error communicating with Gemini: {e}")
+                    st.warning("🔄 Try checking your API Key or clicking 'Clear Chat'.")
